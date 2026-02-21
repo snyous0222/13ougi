@@ -1,0 +1,934 @@
+/* ===== 定数・データ定義 ===== */
+const INIT_HP = 70, MAX_HP = 100, MAX_OP = 30;
+const OUGI_DEFS = [
+    { id: 1, name: 'ジャッカル', cost: 4, ct: 1, attr: 'choki', prio: 0, icon: '🐺', desc: 'グーに負け。チョキ3点、パー/特殊5点ダメ' },
+    { id: 2, name: '熱愛発覚', cost: 5, ct: 2, attr: 'goo', prio: 0, icon: '💘', desc: '相手の出した属性をターゲットに3T封印。負けの場合は自分のグー封印' },
+    { id: 3, name: 'ママの味', cost: 8, ct: 2, attr: 'goo', prio: 0, icon: '🍱', desc: '自分HP+10。相手パー時両者+10' },
+    { id: 4, name: '約束の日', cost: 4, ct: 6, attr: 'choki', prio: 0, icon: '📅', desc: 'グーに負け。それ以外で次の被ダメ無効' },
+    { id: 5, name: '買収', cost: 5, ct: 10, attr: 'pa', prio: 0, icon: '💴', desc: '自HP-15、OP+15（チョキ相手時無効）' },
+    { id: 6, name: '親友', cost: 6, ct: 3, attr: 'pa', prio: 0, icon: '🤝', desc: 'ダメージ共有。チョキに負け' },
+    { id: 7, name: '科学力', cost: 4, ct: 0, attr: 'special', prio: 0, icon: '🔬', desc: 'ON/OFFトグル（発動OP4）。毎ターOP-5（不足分HP代替）、相手+3ダメ' },
+    { id: 8, name: '超高速破壊拳', cost: 15, ct: 10, attr: 'choki', prio: 0, icon: '👊', desc: 'パーに30ダメ。それ以外は自滅+CT+2' },
+    { id: 9, name: '髭ダンディ', cost: 4, ct: 5, attr: 'special', prio: 3, icon: '🥸', desc: '優先+3。相手の手を強制的に髭ダンディに変更（相手もOP消費、不足時OP=0）' },
+    { id: 10, name: '黄昏', cost: 0, ct: 7, attr: 'special', prio: 2, icon: '🌅', desc: '優先+2。相手奥義キャンセル。HP+5 OP+5。HP30以下限定。通常手相手時自傷5' },
+    { id: 11, name: 'ハッキング', cost: 15, ct: 2, attr: 'special', prio: 0, icon: '💻', desc: '相手手確認後に選択。相手が約束の日でOP+15' },
+    { id: 12, name: 'エンジェル隊', cost: 0, ct: 99, attr: 'special', prio: 9, icon: '👼', desc: '全状態初期化。両者HP1 OP0 CT99。条件付き発動' },
+    { id: 13, name: 'ジャンケン知りません', cost: 20, ct: 99, attr: 'special', prio: 5, icon: '🃏', desc: '1〜50ランダムダメ。防御無効' },
+];
+
+const ATTR_LABEL = { goo: 'グー属性', choki: 'チョキ属性', pa: 'パー属性', special: '特殊属性' };
+const ATTR_CLASS = { goo: 'attr-goo', choki: 'attr-choki', pa: 'attr-pa', special: 'attr-special' };
+const MOVE_ICONS = { goo: '✊', choki: '✌️', pa: '🖐️' };
+const MOVE_NAMES = { goo: 'グー', choki: 'チョキ', pa: 'パー' };
+
+// 三すくみ: A vs B → A勝ち
+const BEATS = { goo: 'choki', choki: 'pa', pa: 'goo' };
+
+/* ===== ゲーム状態 ===== */
+function makeState() {
+    return {
+        hp: INIT_HP, maxHp: MAX_HP, op: 0, maxOp: MAX_OP,
+        seals: { goo: 0, choki: 0, pa: 0, special: 0 }, // 残ターン数
+        cts: {}, // ougiId → 残CT
+        scienceOn: false,
+        shieldNext: false,    // 約束の日・被ダメ無効
+        sharedDmg: false,     // 親友・ダメージ共有
+        usedOugiIds: new Set(), // エンジェル隊条件用
+        angelCondition: false,  // エンジェル隊が使用可能か
+    };
+}
+
+let G; // gameState: { player, enemy, turn, phase, selecting, hackingPending }
+
+/* ===== 初期化 ===== */
+function initGame() {
+    G = {
+        player: makeState(),
+        enemy: makeState(),
+        turn: 1,
+        phase: 'select', // 'select' | 'result' | 'over'
+        playerChoice: null,
+        enemyChoice: null,
+        hackingPending: null, // ハッキング発動時の保留状態
+    };
+    clearLog();
+    addLog('🎮 ゲーム開始！奥義を駆使して勝利を掴め！', 'system');
+    renderUI();
+    renderOugiGrid();
+    enableSelect();
+}
+
+/* ===== UI更新 ===== */
+function renderUI() {
+    updatePanel('p', G.player);
+    updatePanel('e', G.enemy);
+    document.getElementById('turn-display').textContent = `ターン ${G.turn}`;
+}
+
+function updatePanel(prefix, st) {
+    const hpPct = Math.max(0, (st.hp / st.maxHp) * 100);
+    const opPct = (st.op / st.maxOp) * 100;
+    document.getElementById(`${prefix}-hp-val`).textContent = `${Math.max(0, st.hp)}/${st.maxHp}`;
+    document.getElementById(`${prefix}-op-val`).textContent = `${st.op}/${st.maxOp}`;
+    const hpBar = document.getElementById(`${prefix}-hp-bar`);
+    hpBar.style.width = hpPct + '%';
+    hpBar.className = 'bar-fill hp-fill' + (st.hp <= 25 ? ' low' : '');
+    document.getElementById(`${prefix}-op-bar`).style.width = opPct + '%';
+
+    // タグ表示
+    const tags = document.getElementById(`${prefix}-tags`);
+    tags.innerHTML = '';
+    for (const [attr, rem] of Object.entries(st.seals)) {
+        if (rem > 0) tags.innerHTML += `<span class="tag tag-seal">${MOVE_NAMES[attr] || attr}封印${rem}T</span>`;
+    }
+    if (st.scienceOn) tags.innerHTML += `<span class="tag tag-science">科学力ON</span>`;
+    if (st.shieldNext) tags.innerHTML += `<span class="tag tag-shield">次被ダメ無効</span>`;
+    if (st.sharedDmg) tags.innerHTML += `<span class="tag tag-buff">ダメ共有</span>`;
+    if (st.angelCondition) {
+        tags.innerHTML += `<span class="tag tag-buff">👼隊条件達成</span>`;
+    } else {
+        const cond = [1, 2, 3, 4, 5, 9, 11];
+        const done = cond.filter(id => st.usedOugiIds.has(id)).length;
+        if (done > 0) tags.innerHTML += `<span class="tag tag-debuff">👼${done}/7</span>`;
+    }
+}
+
+function renderOugiGrid() {
+    const grid = document.getElementById('ougi-grid');
+    grid.innerHTML = '';
+    for (const o of OUGI_DEFS) {
+        const btn = document.createElement('button');
+        btn.className = 'ougi-btn';
+        btn.id = `ougi-btn-${o.id}`;
+        const ct = G.player.cts[o.id] || 0;
+        const sealed = isOugiSealed(G.player, o);
+        const affordable = G.player.op >= o.cost;
+        const angelCond = (o.id === 12) && !G.player.angelCondition;
+        // 黄昏：HP30以下でないと使用不可
+        const tasogareBlock = (o.id === 10) && G.player.hp > 30;
+        const disabled = ct > 0 || !affordable || angelCond || tasogareBlock;
+        btn.disabled = disabled || sealed;
+        if (sealed) btn.classList.add('sealed');
+        if (o.id === 7 && G.player.scienceOn) btn.classList.add('active-toggle');
+
+        // エンジェル隊：進捗バー生成
+        let extraHtml = '';
+        if (o.id === 12) {
+            const condIds = [1, 2, 3, 4, 5, 9, 11];
+            const done = condIds.filter(id => G.player.usedOugiIds.has(id)).length;
+            const pct = Math.floor((done / 7) * 100);
+            const condIcons = condIds.map(id => {
+                const def = OUGI_DEFS.find(x => x.id === id);
+                const used = G.player.usedOugiIds.has(id);
+                return `<span style="opacity:${used ? 1 : 0.25};font-size:0.7rem" title="${def?.name}">${def?.icon}</span>`;
+            }).join('');
+            extraHtml = `
+              <div style="margin-top:4px">
+                <div style="font-size:0.65rem;color:#9070b0;margin-bottom:2px">条件 ${done}/7</div>
+                <div style="background:rgba(0,0,0,0.4);border-radius:4px;height:5px;overflow:hidden;margin-bottom:3px">
+                  <div style="background:linear-gradient(90deg,#a060ff,#ff60cc);width:${pct}%;height:100%;border-radius:4px;transition:width 0.3s"></div>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:1px">${condIcons}</div>
+              </div>`;
+        }
+        // 黄昏：HP条件表示
+        if (o.id === 10 && tasogareBlock) {
+            extraHtml += `<div style="font-size:0.65rem;color:#ff8050;margin-top:3px">HP30以下で発動可</div>`;
+        }
+
+        btn.innerHTML = `
+      <span class="o-name">${o.icon} ${o.name}</span>
+      <span class="o-cost">消費OP: ${o.cost}</span>
+      <span class="o-attr ${ATTR_CLASS[o.attr]}">${ATTR_LABEL[o.attr]}</span>
+      ${ct > 0 ? `<span class="ct-remaining">CT${ct}</span>` : `<span class="o-ct">CT${o.ct}</span>`}
+      ${extraHtml}
+    `;
+        btn.setAttribute('data-tip', o.desc);
+        if (!btn.disabled) btn.onclick = () => playerSelectOugi(o.id);
+        grid.appendChild(btn);
+    }
+}
+
+function isOugiSealed(st, o) {
+    return (st.seals[o.attr] || 0) > 0;
+}
+
+function enableSelect() {
+    document.getElementById('select-area').style.pointerEvents = 'auto';
+    document.getElementById('select-area').style.opacity = '1';
+    ['goo', 'choki', 'pa'].forEach(m => {
+        const btn = document.getElementById(`btn-${m}`);
+        btn.disabled = (G.player.seals[m] || 0) > 0;
+        btn.className = 'move-btn' + (btn.disabled ? ' sealed' : '');
+    });
+    renderOugiGrid();
+}
+
+function disableSelect() {
+    document.getElementById('select-area').style.pointerEvents = 'none';
+    document.getElementById('select-area').style.opacity = '0.5';
+}
+
+/* ===== ログ ===== */
+function addLog(msg, type = 'system') {
+    const el = document.getElementById('log-container');
+    const div = document.createElement('div');
+    div.className = `log-line log-${type}`;
+    div.textContent = msg;
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+}
+function clearLog() {
+    document.getElementById('log-container').innerHTML = '';
+}
+
+/* ===== プレイヤー選択 ===== */
+function playerSelect(move) {
+    if (G.phase !== 'select') return;
+    G.playerChoice = { type: 'normal', move };
+    disableSelect();
+    runCpuTurn();
+}
+
+function playerSelectOugi(id) {
+    if (G.phase !== 'select') return;
+    const o = OUGI_DEFS.find(x => x.id === id);
+    if (!o) return;
+    if (G.player.op < o.cost) { addLog('OP不足です', 'system'); return; }
+
+    if (id === 11) {
+        // ハッキング：先にCPU手を決定し、プレイヤーに見せる
+        const cpuMove = cpuDecide(null); // ヒント無し
+        G.hackingPending = { cpuMove };
+        showHackingModal(cpuMove);
+        return;
+    }
+
+    G.playerChoice = { type: 'ougi', id };
+    disableSelect();
+    runCpuTurn();
+}
+
+/* ===== ハッキングモーダル ===== */
+function showHackingModal(cpuMove) {
+    const modal = document.getElementById('hacking-modal');
+    modal.classList.remove('hidden');
+    const info = document.getElementById('hacking-enemy-info');
+    const moveName = cpuMove.type === 'normal'
+        ? `${MOVE_ICONS[cpuMove.move]} ${MOVE_NAMES[cpuMove.move]}`
+        : `${OUGI_DEFS.find(o => o.id === cpuMove.id)?.icon} ${OUGI_DEFS.find(o => o.id === cpuMove.id)?.name}`;
+    info.textContent = `CPUの手：${moveName}`;
+
+    const choices = document.getElementById('hacking-choices');
+    choices.innerHTML = '';
+
+    // ── 通常手 ──
+    const normalSec = document.createElement('div');
+    normalSec.style.cssText = 'grid-column:1/-1;font-size:0.72rem;color:#9070b0;margin-bottom:4px;';
+    normalSec.textContent = '◆ 通常手';
+    choices.appendChild(normalSec);
+    ['goo', 'choki', 'pa'].forEach(m => {
+        const btn = document.createElement('button');
+        btn.className = 'move-btn';
+        btn.style.padding = '8px';
+        btn.innerHTML = `<span class="icon" style="font-size:1.4rem">${MOVE_ICONS[m]}</span>${MOVE_NAMES[m]}`;
+        const sealed = (G.player.seals[m] || 0) > 0;
+        btn.disabled = sealed;
+        btn.onclick = () => { closeHackingModal(); commitHacking({ type: 'normal', move: m }); };
+        choices.appendChild(btn);
+    });
+
+    // ── 奥義 ──
+    const ougiLabel = document.createElement('div');
+    ougiLabel.style.cssText = 'grid-column:1/-1;font-size:0.72rem;color:#9070b0;margin:8px 0 4px;';
+    ougiLabel.textContent = '◆ 奥義（OP消費）';
+    choices.appendChild(ougiLabel);
+    for (const o of OUGI_DEFS) {
+        if (o.id === 11) continue; // ハッキング中にハッキングは不可
+        const ct = G.player.cts[o.id] || 0;
+        const sealed = isOugiSealed(G.player, o);
+        const HACK_COST = 15;
+        const totalCost = HACK_COST + o.cost;
+        const affordable = G.player.op >= totalCost; // ハッキング15 + 奥義コスト
+        const tasogareBlock = (o.id === 10) && G.player.hp > 30;
+        const angelBlock = (o.id === 12) && !G.player.angelCondition;
+        const unavail = ct > 0 || !affordable || sealed || tasogareBlock || angelBlock;
+        const btn = document.createElement('button');
+        btn.className = 'ougi-btn';
+        btn.style.cssText = 'font-size:0.72rem;';
+        btn.innerHTML = `<span class="o-name">${o.icon} ${o.name}</span><span class="o-cost" style="font-size:0.65rem">OP-${totalCost}(15+${o.cost})${ct > 0 ? ` CT${ct}` : ''}</span>`;
+        btn.disabled = unavail;
+        if (!unavail) {
+            btn.onclick = () => { closeHackingModal(); commitHacking({ type: 'ougi', id: o.id }); };
+        }
+        choices.appendChild(btn);
+    }
+}
+function closeHackingModal() {
+    document.getElementById('hacking-modal').classList.add('hidden');
+}
+function commitHacking(playerMove) {
+    G.playerChoice = { type: 'ougi', id: 11, subChoice: playerMove };
+    G.enemyChoice = G.hackingPending.cpuMove;
+    G.hackingPending = null;
+    disableSelect();
+    resolveRound();
+}
+
+/* ===== CPU AI ===== */
+function cpuDecide(hint) {
+    const st = G.enemy;
+    // 利用できる奥義を収集
+    const available = OUGI_DEFS.filter(o => {
+        if ((st.cts[o.id] || 0) > 0) return false;
+        if (st.op < o.cost) return false;
+        if (isOugiSealed(st, o)) return false;
+        if (o.id === 12 && !st.angelCondition) return false;
+        return true;
+    });
+
+    // 通常手候補
+    const normalMoves = ['goo', 'choki', 'pa'].filter(m => (st.seals[m] || 0) === 0);
+
+    const allChoices = [];
+    normalMoves.forEach(m => allChoices.push({ type: 'normal', move: m, weight: 3 }));
+    available.forEach(o => {
+        let w = 1;
+        if (o.id === 7) w = st.scienceOn ? 0 : 2; // トグルOFF時は少し選ぶ
+        if (o.id === 10 && st.hp > 30) w = 0;      // 黄昏：HP30以下限定
+        if (o.id === 12 && st.angelCondition) w = 5;
+        if (w > 0) allChoices.push({ type: 'ougi', id: o.id, weight: w });
+    });
+
+    if (allChoices.length === 0) {
+        // 全部封印→グー強制
+        return { type: 'normal', move: 'goo' };
+    }
+
+    const total = allChoices.reduce((s, c) => s + c.weight, 0);
+    let r = Math.random() * total;
+    for (const c of allChoices) {
+        r -= c.weight;
+        if (r <= 0) return c;
+    }
+    return allChoices[allChoices.length - 1];
+}
+
+function runCpuTurn() {
+    document.getElementById('cpu-thinking').textContent = 'CPU思考中…';
+    setTimeout(() => {
+        document.getElementById('cpu-thinking').textContent = '';
+        G.enemyChoice = cpuDecide(null);
+        resolveRound();
+    }, 600);
+}
+
+/* ===== ラウンド解決 ===== */
+function resolveRound() {
+    G.phase = 'result';
+    const pc = G.playerChoice;
+    const ec = G.enemyChoice;
+    const ps = G.player;
+    const es = G.enemy;
+
+    addLog(`━━ ターン ${G.turn} ━━`, 'system');
+
+    // 優先度計算
+    let pPrio = pc.type === 'ougi' ? (OUGI_DEFS.find(o => o.id === pc.id)?.prio || 0) : 0;
+    let ePrio = ec.type === 'ougi' ? (OUGI_DEFS.find(o => o.id === ec.id)?.prio || 0) : 0;
+
+    // --- エンジェル隊（優先prio=9：最優先処理） ---
+    let angelPlayer = pc.type === 'ougi' && pc.id === 12 && ps.angelCondition;
+    let angelEnemy = ec.type === 'ougi' && ec.id === 12 && es.angelCondition;
+    if (angelPlayer || angelEnemy) {
+        applyAngel(angelPlayer, angelEnemy);
+        return;
+    }
+
+    // --- 黄昏 優先処理: 相手奥義キャンセル ---
+    let yamikumoActive = false;
+    if (pc.type === 'ougi' && pc.id === 10 && ps.hp <= 30) {
+        if (ec.type === 'ougi') {
+            addLog(`${OUGI_DEFS[9].icon} 黄昏 発動！相手奥義をキャンセル！`, 'ougi');
+            ec.cancelled = true;
+        }
+        yamikumoActive = true;
+    }
+    if (ec.type === 'ougi' && ec.id === 10 && es.hp <= 30) {
+        if (pc.type === 'ougi') {
+            addLog(`CPU: ${OUGI_DEFS[9].icon} 黄昏 発動！プレイヤー奥義キャンセル！`, 'ougi');
+            pc.cancelled = true;
+        }
+        yamikumoActive = true;
+    }
+
+    // --- 髭ダンディ（優先prio=3）: 相手手を強制的に髭ダンディへ変更 ---
+    let hiseDandy = null;
+    if (pc.type === 'ougi' && pc.id === 9 && !pc.cancelled) hiseDandy = 'player';
+    if (ec.type === 'ougi' && ec.id === 9 && !ec.cancelled) hiseDandy = hiseDandy ? 'both' : 'enemy';
+
+    // --- ジャンケン知りません（優先prio=5） ---
+    let jkPlayer = pc.type === 'ougi' && pc.id === 13 && !pc.cancelled;
+    let jkEnemy = ec.type === 'ougi' && ec.id === 13 && !ec.cancelled;
+
+    // 発動者OPを消費
+    consumeOp(pc, ps, 'プレイヤー');
+    consumeOp(ec, es, 'CPU');
+
+    // 表示
+    showHands(pc, ec);
+
+    // 髭ダンディ処理
+    if (hiseDandy) {
+        applyHiseDandy(hiseDandy, pc, ec);
+        postTurn();
+        return;
+    }
+
+    // ジャンケン知りません
+    if (jkPlayer && jkEnemy) {
+        const pd = randInt(1, 50), ed2 = randInt(1, 50);
+        addLog(`プレイヤー: 🃏 ジャンケン知りません → CPUに${pd}ダメ！`, 'ougi');
+        addLog(`CPU: 🃏 ジャンケン知りません → プレイヤーに${ed2}ダメ！`, 'ougi');
+        applyDmgDirect(es, pd, ps);
+        applyDmgDirect(ps, ed2, es);
+        setCT(pc, ps); setCT(ec, es);
+        postTurn(); return;
+    }
+    if (jkPlayer) {
+        const d = randInt(1, 50);
+        addLog(`プレイヤー: 🃏 ジャンケン知りません → CPUに${d}ダメ！`, 'ougi');
+        applyDmgDirect(es, d, ps);
+        // 相手は通常/他奥義
+        resolveEnemyNormal(pc, ec, ps, es, true);
+        setCT(pc, ps); setCT(ec, es);
+        postTurn(); return;
+    }
+    if (jkEnemy) {
+        const d = randInt(1, 50);
+        addLog(`CPU: 🃏 ジャンケン知りません → プレイヤーに${d}ダメ！`, 'ougi');
+        applyDmgDirect(ps, d, es);
+        resolvePlayerNormal(pc, ec, ps, es, true);
+        setCT(pc, ps); setCT(ec, es);
+        postTurn(); return;
+    }
+
+    // 属性取得
+    const pAttr = getAttr(pc);
+    const eAttr = getAttr(ec);
+
+    // 勝敗判定（特殊属性は全属性に不利→全通常手に負け）
+    const result = judgeResult(pAttr, eAttr);
+    addLog(`勝敗: ${result === 'player' ? 'プレイヤー勝利' : result === 'enemy' ? 'CPU勝利' : 'あいこ'}`, 'system');
+
+    // 各奥義の固有処理を実行
+    processOugiEffects(pc, ec, ps, es, result);
+
+    postTurn();
+}
+
+function getAttr(choice) {
+    if (choice.type === 'normal') return choice.move;
+    if (choice.type === 'ougi') {
+        if (choice.cancelled) return choice.subChoice ? choice.subChoice.move : 'goo';
+        return OUGI_DEFS.find(o => o.id === choice.id)?.attr || 'goo';
+    }
+    return 'goo';
+}
+
+function judgeResult(pAttr, eAttr) {
+    if (pAttr === eAttr) return 'draw';
+    // 特殊属性は通常三すくみに負け
+    if (pAttr === 'special' && eAttr !== 'special') return 'enemy';
+    if (eAttr === 'special' && pAttr !== 'special') return 'player';
+    // 両方特殊→あいこ
+    if (pAttr === 'special' && eAttr === 'special') return 'draw';
+    // 通常三すくみ
+    if (BEATS[pAttr] === eAttr) return 'player';
+    if (BEATS[eAttr] === pAttr) return 'enemy';
+    return 'draw';
+}
+
+function processOugiEffects(pc, ec, ps, es, result) {
+    // 黄昏：通常手相手なら自傷5
+    if (pc.type === 'ougi' && pc.id === 10 && ps.hp <= 30 && !pc.cancelled) {
+        applyHeal(ps, 5, 'プレイヤー'); changeOP(ps, 5, 'プレイヤー');
+        if (ec.type === 'normal') {
+            addLog('黄昏：通常手相手のため自傷5！', 'damage');
+            applyDmgDirect(ps, 5, es);
+        }
+    }
+    if (ec.type === 'ougi' && ec.id === 10 && es.hp <= 30 && !ec.cancelled) {
+        applyHeal(es, 5, 'CPU'); changeOP(es, 5, 'CPU');
+        if (pc.type === 'normal') {
+            addLog('CPU 黄昏：通常手相手のため自傷5！', 'damage');
+            applyDmgDirect(es, 5, ps);
+        }
+    }
+
+    // ジャッカル
+    if (pc.type === 'ougi' && pc.id === 1 && !pc.cancelled) applyJackal(ps, es, result, ec, 'プレイヤー');
+    if (ec.type === 'ougi' && ec.id === 1 && !ec.cancelled) applyJackal(es, ps, flipResult(result), pc, 'CPU');
+
+    // 熱愛発覚
+    if (pc.type === 'ougi' && pc.id === 2 && !pc.cancelled) applyHotai(ps, es, result, getAttr(ec), 'プレイヤー');
+    if (ec.type === 'ougi' && ec.id === 2 && !ec.cancelled) applyHotai(es, ps, flipResult(result), getAttr(pc), 'CPU');
+
+    // ママの味
+    if (pc.type === 'ougi' && pc.id === 3 && !pc.cancelled) applyMama(ps, es, getAttr(ec), 'プレイヤー');
+    if (ec.type === 'ougi' && ec.id === 3 && !ec.cancelled) applyMama(es, ps, getAttr(pc), 'CPU');
+
+    // 約束の日
+    if (pc.type === 'ougi' && pc.id === 4 && !pc.cancelled) applyYakusoku(ps, es, result, getAttr(ec), 'プレイヤー');
+    if (ec.type === 'ougi' && ec.id === 4 && !ec.cancelled) applyYakusoku(es, ps, flipResult(result), getAttr(pc), 'CPU');
+
+    // 買収
+    if (pc.type === 'ougi' && pc.id === 5 && !pc.cancelled) applyKaishuu(ps, es, getAttr(ec), 'プレイヤー');
+    if (ec.type === 'ougi' && ec.id === 5 && !ec.cancelled) applyKaishuu(es, ps, getAttr(pc), 'CPU');
+
+    // 親友
+    if (pc.type === 'ougi' && pc.id === 6 && !pc.cancelled) applyShinyuu(ps, es, result, 'プレイヤー');
+    if (ec.type === 'ougi' && ec.id === 6 && !ec.cancelled) applyShinyuu(es, ps, flipResult(result), 'CPU');
+
+    // 超高速破壊拳
+    if (pc.type === 'ougi' && pc.id === 8 && !pc.cancelled) applyChokosoku(ps, es, getAttr(ec), 'プレイヤー');
+    if (ec.type === 'ougi' && ec.id === 8 && !ec.cancelled) applyChokosoku(es, ps, getAttr(pc), 'CPU');
+
+    // 通常勝敗ダメ（奥義が覆わない場合）
+    const pIsNormal = pc.type === 'normal' || pc.cancelled;
+    const eIsNormal = ec.type === 'normal' || ec.cancelled;
+    const pSpecial = !pIsNormal && isSpecialOugi(pc.id);
+    const eSpecial = !eIsNormal && isSpecialOugi(ec.id);
+
+    if ((pIsNormal || pSpecial) && (eIsNormal || eSpecial)) {
+        // 奥義が固有ダメを持たない場合の通常判定
+        if (result === 'player') {
+            changeOP(ps, 2, 'プレイヤー');
+            applyDmg(es, ps, 2, 'CPU');
+        } else if (result === 'enemy') {
+            changeOP(es, 2, 'CPU');
+            applyDmg(ps, es, 2, 'プレイヤー');
+        } else {
+            changeOP(ps, 1, 'プレイヤー'); changeOP(es, 1, 'CPU');
+            addLog('あいこ！両者OP+1', 'system');
+        }
+    }
+
+    // 科学力オン側の追加ダメ
+    if (ps.scienceOn) {
+        addLog('科学力：CPUに追加3ダメ', 'damage');
+        applyDmgDirect(es, 3, ps);
+    }
+    if (es.scienceOn) {
+        addLog('CPU 科学力：プレイヤーに追加3ダメ', 'damage');
+        applyDmgDirect(ps, 3, es);
+    }
+
+    // CT更新
+    setCT(pc, ps); setCT(ec, es);
+    // 奥義使用記録（エンジェル隊条件）
+    if (pc.type === 'ougi' && !pc.cancelled) { ps.usedOugiIds.add(pc.id); checkAngelCondition(ps); }
+    if (ec.type === 'ougi' && !ec.cancelled) { es.usedOugiIds.add(ec.id); checkAngelCondition(es); }
+}
+
+function isSpecialOugi(id) {
+    return [7, 9, 10, 11, 12, 13].includes(id);
+}
+
+function flipResult(r) { return r === 'player' ? 'enemy' : r === 'enemy' ? 'player' : 'draw'; }
+
+/* ===== 奥義個別実装 ===== */
+function applyJackal(self, opp, result, oppChoice, who) {
+    const eAttr = getAttr(oppChoice);
+    addLog(`${who}: 🐺 ジャッカル発動！`, 'ougi');
+    // グーに負け確定（属性判定は goo vs choki）
+    if (eAttr === 'goo') {
+        // 負け：通常敗北ダメ
+        changeOP(opp, 2, who === 'プレイヤー' ? 'CPU' : 'プレイヤー');
+        applyDmg(self, opp, 2, who);
+    } else if (eAttr === 'choki') {
+        applyDmgDirect(opp, 3, self);
+        addLog(`${who} → 相手に3ダメ(チョキ)`, 'damage');
+    } else {
+        applyDmgDirect(opp, 5, self);
+        addLog(`${who} → 相手に5ダメ(パー/特殊)`, 'damage');
+    }
+}
+
+function applyHotai(self, opp, result, oppAttr, who) {
+    addLog(`${who}: 💘 熱愛発覚！`, 'ougi');
+    if (result === 'enemy' || (result === 'draw' && false)) {
+        // 自分が負け→自分のグー封印
+        self.seals['goo'] = 3;
+        addLog(`${who}がグー属性を３ターン封印された！`, 'damage');
+    } else {
+        // 勝ちまたはあいこ→相手の出した属性の㌷のみ３ターン封印
+        if (opp.seals[oppAttr] !== undefined) {
+            opp.seals[oppAttr] = 3;
+            addLog(`相手の${ATTR_LABEL[oppAttr]}の手を３ターン封印！`, 'damage');
+        }
+    }
+}
+
+function applyMama(self, opp, oppAttr, who) {
+    addLog(`${who}: 🍱 ママの味発動！`, 'ougi');
+    applyHeal(self, 10, who);
+    if (oppAttr === 'pa') {
+        applyHeal(opp, 10, who === 'プレイヤー' ? 'CPU' : 'プレイヤー');
+        addLog('相手のパーにより両者HP+10！', 'heal');
+    }
+}
+
+function applyYakusoku(self, opp, result, oppAttr, who) {
+    addLog(`${who}: 📅 約束の日発動！`, 'ougi');
+    if (oppAttr === 'goo') {
+        // 負け確定
+        changeOP(opp, 2, who === 'プレイヤー' ? 'CPU' : 'プレイヤー');
+        applyDmg(self, opp, 2, who);
+    } else {
+        // 次の被ダメ無効
+        self.shieldNext = true;
+        addLog(`${who}：次の被ダメを無効化！`, 'buff');
+    }
+}
+
+function applyKaishuu(self, opp, oppAttr, who) {
+    addLog(`${who}: 💴 買収発動！`, 'ougi');
+    if (oppAttr === 'choki') {
+        addLog(`チョキ相手のため無効`, 'system');
+        return;
+    }
+    self.hp -= 15; self.hp = Math.max(0, self.hp);
+    addLog(`${who}：自分HP-15`, 'damage');
+    const gain = Math.min(15, self.maxOp - self.op);
+    self.op += gain;
+    addLog(`${who}：OP+${gain}`, 'heal');
+}
+
+function applyShinyuu(self, opp, result, who) {
+    addLog(`${who}: 🤝 親友発動！チョキに負け`, 'ougi');
+    // ダメージ共有フラグ（このターンは通常ダメを共有）
+    // チョキに負け確定（親友のattr=pa、チョキはpaに勝つ）
+    // 通常ダメを両者に適用
+    self.sharedDmg = true;
+}
+
+function applyChokosoku(self, opp, oppAttr, who) {
+    addLog(`${who}: 👊 超高速破壊拳発動！`, 'ougi');
+    if (oppAttr === 'pa') {
+        addLog(`パーに30ダメ！`, 'ougi');
+        applyDmgDirect(opp, 30, self);
+    } else {
+        addLog(`パー以外への使用…自滅！`, 'damage');
+        self.hp = 0;
+        const ougiDef = OUGI_DEFS.find(o => o.id === 8);
+        self.cts[8] = (self.cts[8] || 0) + 2; // CT+2ペナルティ
+    }
+}
+
+function applyHiseDandy(side, pc, ec) {
+    // 髭ダンディを発動した側：相手の手を強制的に髭ダンディに変更（相手もOP消費）
+    const HISE_COST = 4; // 髭ダンディのコスト
+
+    if (side === 'player' || side === 'both') {
+        addLog(`プレイヤー: 🥸 髭ダンディ発動！CPUの手を強制的に髭ダンディに変更！`, 'ougi');
+        // CPUのOP消費処理
+        if (G.enemy.op >= HISE_COST) {
+            G.enemy.op -= HISE_COST;
+            addLog(`CPU: 強制発動（OP-${HISE_COST}）`, 'ougi');
+        } else {
+            addLog(`CPU: OP不足のためOP→0`, 'damage');
+            G.enemy.op = 0;
+        }
+        // CPUの手を髭ダンディに上書き
+        G.enemyChoice = { type: 'ougi', id: 9, forcedByOpponent: true };
+        // CT設定
+        G.enemy.cts[9] = OUGI_DEFS.find(o => o.id === 9).ct;
+        G.enemy.usedOugiIds.add(9); checkAngelCondition(G.enemy);
+    }
+    if (side === 'enemy' || side === 'both') {
+        addLog(`CPU: 🥸 髭ダンディ発動！プレイヤーの手を強制的に髭ダンディに変更！`, 'ougi');
+        // プレイヤーのOP消費処理
+        if (G.player.op >= HISE_COST) {
+            G.player.op -= HISE_COST;
+            addLog(`プレイヤー: 強制発動（OP-${HISE_COST}）`, 'ougi');
+        } else {
+            addLog(`プレイヤー: OP不足のためOP→0`, 'damage');
+            G.player.op = 0;
+        }
+        // プレイヤーの手を髭ダンディに上書き
+        G.playerChoice = { type: 'ougi', id: 9, forcedByOpponent: true };
+        G.player.cts[9] = OUGI_DEFS.find(o => o.id === 9).ct;
+        G.player.usedOugiIds.add(9); checkAngelCondition(G.player);
+    }
+
+    // 両者が髭ダンディ → あいこ扱い（OP+1）
+    addLog('両者 🥸 髭ダンディ → あいこ！両者OP+1', 'system');
+    changeOP(G.player, 1, 'プレイヤー'); changeOP(G.enemy, 1, 'CPU');
+
+    // 元の発動者のCT・奥義記録
+    setCT(pc, G.player); setCT(ec, G.enemy);
+    if (pc.type === 'ougi' && !pc.forcedByOpponent) { G.player.usedOugiIds.add(pc.id); checkAngelCondition(G.player); }
+    if (ec.type === 'ougi' && !ec.forcedByOpponent) { G.enemy.usedOugiIds.add(ec.id); checkAngelCondition(G.enemy); }
+}
+
+function applyAngel(forPlayer, forEnemy) {
+    addLog('👼 エンジェル隊発動！全状態を初期化！', 'ougi');
+    const resetState = (st) => {
+        st.hp = 1; st.op = 0;
+        st.seals = { goo: 0, choki: 0, pa: 0, special: 0 };
+        Object.keys(st.cts).forEach(k => st.cts[k] = 99);
+        st.scienceOn = false; st.shieldNext = false; st.sharedDmg = false;
+        st.angelCondition = false;
+    };
+    resetState(G.player); resetState(G.enemy);
+    G.phase = 'select';
+    G.turn++;
+    renderUI(); renderOugiGrid(); enableSelect();
+    showHands({ type: 'ougi', id: 12 }, { type: 'ougi', id: 12 });
+    document.getElementById('result-banner').textContent = '✨ エンジェル隊 ✨';
+    document.getElementById('result-banner').className = 'result-banner draw';
+    document.getElementById('result-banner').style.opacity = '1';
+    return;
+}
+
+/* ===== 科学力トグル ===== */
+function applyScienceToggle(st, who) {
+    st.scienceOn = !st.scienceOn;
+    addLog(`${who}: 🔬 科学力${st.scienceOn ? 'ON' : 'OFF'}`, 'ougi');
+}
+
+/* ===== HP/OP操作 ===== */
+function applyDmg(victim, attacker, amount, victimName) {
+    if (victim.shieldNext) {
+        addLog(`${victimName}：被ダメ無効！`, 'buff');
+        victim.shieldNext = false;
+        return;
+    }
+    if (victim.sharedDmg) {
+        const half = Math.ceil(amount / 2);
+        victim.hp -= half; victim.hp = Math.max(0, victim.hp);
+        attacker.hp -= half; attacker.hp = Math.max(0, attacker.hp);
+        addLog(`親友：ダメージ${amount}を共有（各${half}）`, 'damage');
+        return;
+    }
+    victim.hp -= amount; victim.hp = Math.max(0, victim.hp);
+    addLog(`${victimName}に${amount}ダメ！`, 'damage');
+}
+
+function applyDmgDirect(victim, amount, attacker) {
+    // 防御無効 or 通常（シールドチェックしない版）
+    victim.hp -= amount; victim.hp = Math.max(0, victim.hp);
+}
+
+function applyHeal(target, amount, who) {
+    target.hp = Math.min(target.maxHp, target.hp + amount);
+    addLog(`${who}：HP+${amount}`, 'heal');
+}
+
+function changeOP(st, delta, who) {
+    st.op = Math.max(0, Math.min(st.maxOp, st.op + delta));
+}
+
+/* ===== CT管理 ===== */
+function setCT(choice, st) {
+    if (choice.type === 'ougi' && choice.id !== 7) {
+        const o = OUGI_DEFS.find(x => x.id === choice.id);
+        if (o) st.cts[o.id] = o.ct;
+    }
+}
+
+/* ===== エンジェル隊条件 ===== */
+function checkAngelCondition(st) {
+    // 条件奥義：ジャッカル/熱愛発覚/ママの味/約束の日/買収/髭ダンディ/ハッキング
+    const condIds = [1, 2, 3, 4, 5, 9, 11];
+    if (condIds.every(id => st.usedOugiIds.has(id))) {
+        if (!st.angelCondition) {
+            st.angelCondition = true;
+            addLog('🔔 エンジェル隊の発動条件を達成！', 'ougi');
+        }
+    }
+}
+
+/* ===== 通常/他の奥義の処理（JK知りません片側）===== */
+function resolveEnemyNormal(pc, ec, ps, es, skipNormal) { }
+function resolvePlayerNormal(pc, ec, ps, es, skipNormal) { }
+
+/* ===== ターン後処理 ===== */
+function postTurn() {
+    // 科学力毎ターン処理
+    [['player', G.player, G.enemy], ['enemy', G.enemy, G.player]].forEach(([who, st, opp]) => {
+        if (st.scienceOn) {
+            if (st.op >= 5) {
+                st.op -= 5; addLog(`${who === 'player' ? 'プレイヤー' : 'CPU'} 科学力：OP-5`, 'system');
+            } else {
+                const lack = 5 - st.op; st.op = 0; st.hp -= lack; st.hp = Math.max(0, st.hp);
+                addLog(`${who === 'player' ? 'プレイヤー' : 'CPU'} 科学力：OP不足! HP-${lack}`, 'damage');
+            }
+        }
+    });
+
+    // CT減算・封印更新
+    [G.player, G.enemy].forEach(st => {
+        for (const k in st.cts) { if (st.cts[k] > 0) st.cts[k]--; }
+        for (const attr in st.seals) { if (st.seals[attr] > 0) st.seals[attr]--; }
+        st.sharedDmg = false; // 毎ターンクリア
+    });
+
+    // OP自然増加（通常手のとき）
+    [['player', G.player, G.playerChoice], ['enemy', G.enemy, G.enemyChoice]].forEach(([who, st, ch]) => {
+        if (ch && ch.type === 'normal') {
+            // 通常判定でのOP増加はprocessOugiEffects内で処理済み
+            // ただし奥義選択時は消費のみ
+        }
+    });
+
+    renderUI();
+    checkGameOver();
+
+    if (G.phase !== 'over') {
+        G.turn++;
+        G.phase = 'select';
+        G.playerChoice = null;
+        G.enemyChoice = null;
+        enableSelect();
+    }
+}
+
+/* ===== 手の表示 ===== */
+function showHands(pc, ec) {
+    const pEl = document.getElementById('p-hand-shown');
+    const eEl = document.getElementById('e-hand-shown');
+
+    const getIcon = (c) => {
+        if (!c) return '❓';
+        if (c.type === 'normal') return MOVE_ICONS[c.move];
+        const o = OUGI_DEFS.find(x => x.id === c.id);
+        return o?.icon || '❓';
+    };
+    const getName = (c) => {
+        if (!c) return '?';
+        if (c.type === 'normal') return MOVE_NAMES[c.move];
+        const o = OUGI_DEFS.find(x => x.id === c.id);
+        return o?.name || '?';
+    };
+
+    pEl.innerHTML = `<span class="hand-icon">${getIcon(pc)}</span><div class="hand-name">${getName(pc)}</div>`;
+    eEl.innerHTML = `<span class="hand-icon">${getIcon(ec)}</span><div class="hand-name">${getName(ec)}</div>`;
+    pEl.classList.add('reveal'); eEl.classList.add('reveal');
+    setTimeout(() => { pEl.classList.remove('reveal'); eEl.classList.remove('reveal'); }, 600);
+}
+
+/* ===== OP消費 ===== */
+function consumeOp(choice, st, who) {
+    if (choice.type === 'ougi') {
+        const o = OUGI_DEFS.find(x => x.id === choice.id);
+        if (o) {
+            if (o.id === 7) {
+                // 科学力：トグル（消費3）
+                applyScienceToggle(st, who);
+                st.op = Math.max(0, st.op - o.cost);
+                setCT(choice, st);
+                return;
+            }
+            st.op = Math.max(0, st.op - o.cost);
+            addLog(`${who}: ${o.icon}${o.name} 発動（OP-${o.cost}）`, 'ougi');
+        }
+    }
+}
+
+/* ===== 勝敗チェック ===== */
+function checkGameOver() {
+    const pDead = G.player.hp <= 0;
+    const eDead = G.enemy.hp <= 0;
+    if (!pDead && !eDead) return;
+    G.phase = 'over';
+    const overlay = document.getElementById('gameover-overlay');
+    const title = document.getElementById('gameover-title');
+    const sub = document.getElementById('gameover-sub');
+    overlay.classList.remove('hidden');
+
+    if (pDead && eDead) {
+        title.textContent = '相打ち...'; title.className = 'gameover-title draw';
+        sub.textContent = '両者同時に力尽きた！';
+    } else if (eDead) {
+        title.textContent = '勝利！'; title.className = 'gameover-title win';
+        sub.textContent = `ターン ${G.turn} — 奥義を制した！`;
+    } else {
+        title.textContent = '敗北...'; title.className = 'gameover-title lose';
+        sub.textContent = `ターン ${G.turn} — 再挑戦せよ！`;
+    }
+    addLog(pDead && eDead ? '相打ち！' : eDead ? '🎉 プレイヤーの勝利！' : '💀 CPUの勝利…', 'system');
+
+    // バナー更新
+    const banner = document.getElementById('result-banner');
+    banner.textContent = (pDead && eDead) ? '相打ち' : eDead ? 'プレイヤー勝利！' : 'CPU勝利...';
+    banner.className = 'result-banner ' + (pDead && eDead ? 'draw' : eDead ? 'win' : 'lose');
+    banner.style.opacity = '1';
+    showHands(G.playerChoice, G.enemyChoice);
+}
+
+/* ===== リスタート ===== */
+function restartGame() {
+    document.getElementById('gameover-overlay').classList.add('hidden');
+    document.getElementById('result-banner').style.opacity = '0';
+    document.getElementById('p-hand-shown').innerHTML = '<span class="hand-icon">❓</span><div class="hand-name">プレイヤー</div>';
+    document.getElementById('e-hand-shown').innerHTML = '<span class="hand-icon">❓</span><div class="hand-name">CPU</div>';
+    initGame();
+}
+
+/* ===== ユーティリティ ===== */
+function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+/* ===== ツールチップ ===== */
+function initTooltip() {
+    const tip = document.getElementById('ougi-tooltip');
+    if (!tip) return;
+    let hideTimer = null;
+
+    function showTip(el, text) {
+        clearTimeout(hideTimer);
+        tip.textContent = text;
+        tip.style.display = 'block';
+        positionTip(el);
+    }
+    function hideTip() {
+        hideTimer = setTimeout(() => { tip.style.display = 'none'; }, 80);
+    }
+    function positionTip(el) {
+        const rect = el.getBoundingClientRect();
+        const sw = window.innerWidth, sh = window.innerHeight;
+        let left = rect.left + window.scrollX;
+        let top = rect.top + window.scrollY - tip.offsetHeight - 8;
+        if (top < window.scrollY + 4) top = rect.bottom + window.scrollY + 8;
+        if (left + tip.offsetWidth > sw - 8) left = sw - tip.offsetWidth - 8;
+        if (left < 4) left = 4;
+        tip.style.left = left + 'px';
+        tip.style.top = top + 'px';
+    }
+
+    // ハイドレーション：イベント委譲
+    document.addEventListener('mouseover', e => {
+        const btn = e.target.closest('[data-tip]');
+        if (btn) showTip(btn, btn.dataset.tip);
+    });
+    document.addEventListener('mouseout', e => {
+        const btn = e.target.closest('[data-tip]');
+        if (btn) hideTip();
+    });
+    // タッチ対応
+    document.addEventListener('touchstart', e => {
+        const btn = e.target.closest('[data-tip]');
+        if (btn) { showTip(btn, btn.dataset.tip); }
+    }, { passive: true });
+    document.addEventListener('touchend', () => hideTip(), { passive: true });
+}
+
+/* ===== ツールチップ属性付与（奥義ボタン生成後に呼ぶ） ===== */
+function attachTips() {
+    // 奥義ボタンへのdata-tip付与はrenderOugiGrid内で実施
+}
+
+/* ===== 起動 ===== */
+initGame();
+initTooltip();
